@@ -505,19 +505,57 @@ async function runSync() {
   const existingRows = sheetRes.data.values || [];
 
   for (const bundle of bundles) {
-    const primary = bundle.claims[0].claim;
-    const hasEobOrInvoice = bundle.claims.some(
+    // Order claims so EOBs/Invoices come before payment receipts/statements
+    const orderedClaims = [...bundle.claims].sort((a, b) => {
+      const aIsMed =
+        a.doc.docType === "EOB" ||
+        a.doc.docType === "BILL_OR_INVOICE" ||
+        a.claim.provesMedicalNecessity;
+      const bIsMed =
+        b.doc.docType === "EOB" ||
+        b.doc.docType === "BILL_OR_INVOICE" ||
+        b.claim.provesMedicalNecessity;
+      return aIsMed === bIsMed ? 0 : aIsMed ? -1 : 1;
+    });
+
+    const primary = orderedClaims[0].claim;
+    const hasEobOrInvoice = orderedClaims.some(
       (c) =>
         c.claim.provesMedicalNecessity ||
         c.doc.docType === "EOB" ||
         c.doc.docType === "BILL_OR_INVOICE"
     );
-    const hasReceiptOrStatement = bundle.claims.some(
+    const hasReceiptOrStatement = orderedClaims.some(
       (c) =>
         c.claim.provesPayment ||
         c.doc.docType === "PAYMENT_RECEIPT" ||
         c.doc.docType === "CC_STATEMENT"
     );
+    const isBundleComplete = hasEobOrInvoice && hasReceiptOrStatement;
+
+    const existingRowIndex = existingRows.findIndex(
+      (r) =>
+        r[3] === primary.patient &&
+        parseFloat((r[8] || "0").toString().replace(/[$,]/g, "")) ===
+          primary.qualifiedOutOfPocketAmount
+    );
+
+    // Skip re-processing if all docs in this bundle are already sitting in Reference-Pool
+    // and the staged sheet row already reflects the exact same completion state.
+    const allInPool = orderedClaims.every(
+      (c) => path.dirname(c.doc.filePath) === POOL_DIR
+    );
+    if (allInPool && existingRowIndex >= 0) {
+      const existingRow = existingRows[existingRowIndex];
+      const existingMed = existingRow[10] === "Yes";
+      const existingRec = existingRow[11] === "Yes";
+      if (
+        existingMed === hasEobOrInvoice &&
+        existingRec === hasReceiptOrStatement
+      ) {
+        continue;
+      }
+    }
 
     const amountStr = primary.qualifiedOutOfPocketAmount.toFixed(2);
     const pdfFileName = `${primary.dateOfService}_${sanitizeProvider(
@@ -529,18 +567,12 @@ async function runSync() {
     await fs.mkdir(yearReceiptsDir, { recursive: true });
     const outputPdfPath = path.join(yearReceiptsDir, pdfFileName);
 
-    const slicePlan = bundle.claims.map((c) => ({
+    const slicePlan = orderedClaims.map((c) => ({
       fileName: c.doc.fileName,
       filePath: c.doc.filePath,
       pagesToInclude: [c.claim.headerPageIndex, ...c.claim.relevantPageIndices],
     }));
 
-    const existingRowIndex = existingRows.findIndex(
-      (r) =>
-        r[3] === primary.patient &&
-        parseFloat((r[8] || "0").toString().replace(/[$,]/g, "")) ===
-          primary.qualifiedOutOfPocketAmount
-    );
     const targetSheetRow =
       existingRowIndex >= 0 ? 10 + existingRowIndex : 10 + existingRows.length;
 
@@ -575,7 +607,7 @@ async function runSync() {
         : pdfFileName;
 
       const payMethod =
-        bundle.claims.find(
+        orderedClaims.find(
           (c) => c.claim.paymentMethod && c.claim.paymentMethod !== "Unknown"
         )?.claim.paymentMethod || DEFAULT_PAYMENT_METHOD;
       const reimbStatus =
@@ -583,11 +615,14 @@ async function runSync() {
           ? "Paid via HSA Directly"
           : "Unreimbursed (Vaulted)";
       const datePaid =
-        bundle.claims.find((c) => c.claim.datePaid)?.claim.datePaid || "";
-      const combinedNotes = bundle.claims
+        orderedClaims.find((c) => c.claim.datePaid)?.claim.datePaid || "";
+      const combinedNotes = orderedClaims
         .map((c) => c.claim.notes)
         .filter(Boolean)
         .join("; ");
+      const maxBilledAmount = Math.max(
+        ...orderedClaims.map((c) => c.claim.billedOrEobAmount || 0)
+      );
 
       await sheets.spreadsheets.values.batchUpdate({
         spreadsheetId,
@@ -604,7 +639,7 @@ async function runSync() {
                   primary.provider,
                   primary.category,
                   primary.description,
-                  primary.billedOrEobAmount,
+                  maxBilledAmount,
                   primary.qualifiedOutOfPocketAmount,
                   payMethod,
                   hasEobOrInvoice ? "Yes" : "No",
@@ -620,10 +655,11 @@ async function runSync() {
         },
       });
 
-      for (const item of bundle.claims) {
-        const destDir = item.doc.isMultiClaimOrStatement
-          ? POOL_DIR
-          : ARCHIVE_DIR;
+      for (const item of orderedClaims) {
+        const destDir =
+          item.doc.isMultiClaimOrStatement || !isBundleComplete
+            ? POOL_DIR
+            : ARCHIVE_DIR;
         const destPath = path.join(destDir, item.doc.fileName);
         if (item.doc.filePath !== destPath) {
           await fs.rename(item.doc.filePath, destPath).catch(() => {});
