@@ -21,9 +21,13 @@ const CACHE_FILE = path.join(process.cwd(), ".hsa-cache.json");
 
 const TRACKER_TITLE = "Medical Expense & HSA Reimbursement Tracker";
 const SHEET_TAB = process.env.SHEET_TAB_NAME || "HSA Expense Tracker";
+const INSTALLMENT_TAB =
+  process.env.INSTALLMENT_TAB_NAME || "0% Installment Plans";
 const CC_POOL_RETENTION_DAYS = 60;
 
-const HOUSEHOLD_MEMBERS = (process.env.HOUSEHOLD_MEMBERS || "Primary,Spouse,Dependent")
+const HOUSEHOLD_MEMBERS = (
+  process.env.HOUSEHOLD_MEMBERS || "Primary,Spouse,Dependent"
+)
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -56,6 +60,7 @@ interface ExtractedClaim {
   datePaid?: string; // YYYY-MM-DD
   patient: string;
   provider: string;
+  installmentPlanId?: string; // Populated by Gemini when claim/payment matches an active installment plan
   category: "Medical" | "Dental" | "Vision" | "Prescription";
   description: string;
   billedOrEobAmount: number;
@@ -73,10 +78,37 @@ interface ParsedFileMetadata {
   filePath: string;
   fileName: string;
   hash: string;
+  planFingerprint?: string;
   subfolderGroup?: string;
-  docType: "EOB" | "BILL_OR_INVOICE" | "PAYMENT_RECEIPT" | "CC_STATEMENT";
+  docType:
+    | "EOB"
+    | "BILL_OR_INVOICE"
+    | "PAYMENT_RECEIPT"
+    | "CC_STATEMENT"
+    | "TRANSACTION_CSV";
   isMultiClaimOrStatement: boolean;
   claims: ExtractedClaim[];
+}
+
+interface InstallmentPlan {
+  rowIndex: number;
+  planId: string;
+  provider: string;
+  patient: string;
+  totalResponsibility: number;
+  remainingBalance: number;
+  monthlyPayment: number;
+  affiliatedProviders?: string;
+}
+
+interface InstallmentScheduleRow {
+  rowIndex: number;
+  paymentId: string;
+  scheduledDate: string;
+  provider: string;
+  paymentAmount: number;
+  status: string;
+  notes: string;
 }
 
 const extractionSchema: Schema = {
@@ -84,12 +116,18 @@ const extractionSchema: Schema = {
   properties: {
     docType: {
       type: Type.STRING,
-      enum: ["EOB", "BILL_OR_INVOICE", "PAYMENT_RECEIPT", "CC_STATEMENT"],
+      enum: [
+        "EOB",
+        "BILL_OR_INVOICE",
+        "PAYMENT_RECEIPT",
+        "CC_STATEMENT",
+        "TRANSACTION_CSV",
+      ],
     },
     isMultiClaimOrStatement: {
       type: Type.BOOLEAN,
       description:
-        "True if this is a monthly EOB with multiple claims or a full credit card statement.",
+        "True if this is a monthly EOB with multiple claims, a credit card statement, or a multi-row CSV.",
     },
     claims: {
       type: Type.ARRAY,
@@ -102,7 +140,13 @@ const extractionSchema: Schema = {
           patient: { type: Type.STRING, enum: HOUSEHOLD_MEMBERS },
           provider: {
             type: Type.STRING,
-            description: "Clean provider name, e.g., Valley Medical Clinic",
+            description:
+              "Clean provider name. If matching an active installment plan, use the exact installment plan provider name.",
+          },
+          installmentPlanId: {
+            type: Type.STRING,
+            description:
+              "If this EOB or payment belongs to one of the active installment plans provided in the prompt, set to its Plan ID (e.g. PLAN-001).",
           },
           category: {
             type: Type.STRING,
@@ -113,7 +157,7 @@ const extractionSchema: Schema = {
           qualifiedOutOfPocketAmount: {
             type: Type.NUMBER,
             description:
-              "Patient responsibility minus non-qualified items like warranties/protection plans.",
+              "Patient responsibility or installment payment amount minus non-qualified items like warranties/protection plans.",
           },
           nonQualifiedExcludedAmount: { type: Type.NUMBER },
           paymentMethod: {
@@ -139,7 +183,7 @@ const extractionSchema: Schema = {
           provesPayment: {
             type: Type.BOOLEAN,
             description:
-              "True if the document includes a register receipt, paid confirmation, zero-balance invoice, or credit card charge.",
+              "True if the document includes a register receipt, paid confirmation, zero-balance invoice, credit card charge, or CSV payment row.",
           },
           notes: {
             type: Type.STRING,
@@ -188,6 +232,59 @@ async function resolveSpreadsheetId(): Promise<string> {
   return cachedSpreadsheetId;
 }
 
+async function loadInstallmentTab(spreadsheetId: string): Promise<{
+  plans: InstallmentPlan[];
+  schedule: InstallmentScheduleRow[];
+}> {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${INSTALLMENT_TAB}'!A1:K50`,
+    });
+    const rows = res.data.values || [];
+    const plans: InstallmentPlan[] = [];
+    const schedule: InstallmentScheduleRow[] = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const id = (r[1] || "").toString().trim();
+      if (id.startsWith("PLAN-")) {
+        plans.push({
+          rowIndex: i + 1,
+          planId: id,
+          provider: (r[2] || "").toString().trim(),
+          patient: (r[3] || "").toString().trim(),
+          totalResponsibility: parseFloat(
+            (r[4] || "0").toString().replace(/[$,]/g, "")
+          ),
+          remainingBalance: parseFloat(
+            (r[6] || "0").toString().replace(/[$,]/g, "")
+          ),
+          monthlyPayment: parseFloat(
+            (r[7] || "0").toString().replace(/[$,]/g, "")
+          ),
+          affiliatedProviders: (r[10] || "").toString().trim(),
+        });
+      } else if (id.startsWith("PMT-")) {
+        schedule.push({
+          rowIndex: i + 1,
+          paymentId: id,
+          scheduledDate: (r[2] || "").toString().trim(),
+          provider: (r[3] || "").toString().trim(),
+          paymentAmount: parseFloat(
+            (r[5] || "0").toString().replace(/[$,]/g, "")
+          ),
+          status: (r[7] || "").toString().trim(),
+          notes: (r[8] || "").toString().trim(),
+        });
+      }
+    }
+    return { plans, schedule };
+  } catch {
+    return { plans: [], schedule: [] };
+  }
+}
+
 async function hashFile(filePath: string): Promise<string> {
   const buf = await fs.readFile(filePath);
   return crypto.createHash("sha256").update(buf).digest("hex");
@@ -207,14 +304,20 @@ async function saveCache(cache: Record<string, ParsedFileMetadata>) {
 
 async function parseDocumentWithGemini(
   filePath: string,
-  subfolderGroup?: string,
-  cache: Record<string, ParsedFileMetadata> = {}
+  subfolderGroup: string | undefined,
+  cache: Record<string, ParsedFileMetadata>,
+  installmentPlans: InstallmentPlan[]
 ): Promise<ParsedFileMetadata> {
   const hash = await hashFile(filePath);
+  const planFingerprint = installmentPlans.map((p) => p.planId).join(",");
   if (
     cache[hash] &&
+    cache[hash].planFingerprint === planFingerprint &&
     cache[hash].claims?.every(
-      (c) => typeof c.provesMedicalNecessity === "boolean" && Boolean(c.notes)
+      (c) =>
+        typeof c.provesMedicalNecessity === "boolean" &&
+        Boolean(c.notes) &&
+        (!c.paymentMethod || PAYMENT_METHODS.includes(c.paymentMethod))
     )
   ) {
     return {
@@ -226,31 +329,51 @@ async function parseDocumentWithGemini(
   }
 
   const ext = path.extname(filePath).toLowerCase();
-  const mimeType =
-    ext === ".pdf"
-      ? "application/pdf"
-      : ext === ".png"
-      ? "image/png"
-      : "image/jpeg";
   const fileBytes = await fs.readFile(filePath);
+
+  const planContext =
+    installmentPlans.length > 0
+      ? `\n      Active Installment Plans:\n` +
+        installmentPlans
+          .map(
+            (p) =>
+              `      - ${p.planId}: Provider="${p.provider}"${
+                p.affiliatedProviders
+                  ? ` (Affiliated EOB/Billing Providers: ${p.affiliatedProviders})`
+                  : ""
+              }, Patient="${p.patient}", TotalResponsibility=$${p.totalResponsibility}, MonthlyPayment=$${p.monthlyPayment}`
+          )
+          .join("\n") +
+        `\n      If an EOB claim or a payment transaction belongs to one of these installment plans (including any listed affiliated providers/doctors or monthly payment amounts), set 'installmentPlanId' to that Plan ID and set 'provider' to the exact Plan Provider name.`
+      : "";
+
+  const promptText = `Extract all medical claims, bills, pharmacy slips, or medical payment charges from this document for household members ${HOUSEHOLD_PROMPT_NAMES}.${planContext}
+      - Subtract non-qualified items (like eyewear protection plans or warranties) from qualifiedOutOfPocketAmount.
+      - Exclude denied out-of-network claims where the plan did not cover the service due to missing preapproval/referral (e.g., reason code 707) or revised/duplicate $0.00 claims.
+      - For CSV transaction histories or Credit Card Statements, only extract bona fide medical/dental/vision/pharmacy payments or active installment plan payments (ignore payroll contributions, interest, investment transfers, and non-medical retail charges).
+      - Set provesMedicalNecessity to true if the document shows clinical service descriptions, CPT/HCPCS codes, EOB claim details, or a pharmacy Rx slip with drug/patient details.
+      - Set provesPayment to true if the document shows a payment tender, register receipt, paid-in-full balance, credit card charge, or CSV payment transaction.
+      - Always populate 'notes' with a concise audit memo (e.g., "Rx #123456 (Drug Name); Paid via Visa *1234, Auth #98765" or "Claim #2026...; Patient responsibility $150.00").`;
+
+  const contentPart =
+    ext === ".csv"
+      ? { text: `CSV Filename: ${path.basename(filePath)}\n\n${fileBytes.toString("utf8")}` }
+      : {
+          inlineData: {
+            mimeType:
+              ext === ".pdf"
+                ? "application/pdf"
+                : ext === ".png"
+                ? "image/png"
+                : "image/jpeg",
+            data: fileBytes.toString("base64"),
+          },
+        };
 
   console.log(`Analyzing with Gemini: ${path.basename(filePath)}...`);
   const response = await ai.models.generateContent({
     model: "gemini-3.8-flash",
-    contents: [
-      {
-        inlineData: {
-          mimeType,
-          data: fileBytes.toString("base64"),
-        },
-      },
-      `Extract all medical claims, bills, pharmacy slips, or medical credit card charges from this document for household members ${HOUSEHOLD_PROMPT_NAMES}.
-      - Subtract non-qualified items (like eyewear protection plans or warranties) from qualifiedOutOfPocketAmount.
-      - Set provesMedicalNecessity to true if the document shows clinical service descriptions, CPT/HCPCS codes, EOB claim details, or a pharmacy Rx slip with drug/patient details.
-      - Set provesPayment to true if the document shows a payment tender, register receipt, paid-in-full balance, or credit card statement charge.
-      - For EOBs or credit card statements, return separate items in the claims array for each distinct medical claim/charge, along with exact 0-based page indices.
-      - Always populate 'notes' with a concise audit memo (e.g., "Rx #123456 (Drug Name); Paid via Visa *1234, Auth #98765" or "Claim #2026...; Excludes $30 protection plan").`,
-    ],
+    contents: [contentPart, promptText],
     config: {
       responseMimeType: "application/json",
       responseSchema: extractionSchema,
@@ -262,6 +385,7 @@ async function parseDocumentWithGemini(
     filePath,
     fileName: path.basename(filePath),
     hash,
+    planFingerprint,
     subfolderGroup,
     ...parsed,
   };
@@ -273,23 +397,51 @@ async function parseDocumentWithGemini(
 
 async function buildSlicedPdf(
   sources: { filePath: string; pagesToInclude: number[] }[],
-  outputPath: string
+  outputPath: string,
+  prependExistingPdf: boolean = false
 ) {
   const mergedPdf = await PDFDocument.create();
+  const seenPages = new Set<string>();
+
+  if (prependExistingPdf) {
+    try {
+      const existingBytes = await fs.readFile(outputPath);
+      const existingDoc = await PDFDocument.load(existingBytes);
+      const indices = existingDoc.getPageIndices();
+      const copied = await mergedPdf.copyPages(existingDoc, indices);
+      copied.forEach((p) => mergedPdf.addPage(p));
+    } catch {
+      // Output PDF does not exist yet
+    }
+  }
 
   for (const src of sources) {
     const ext = path.extname(src.filePath).toLowerCase();
+    if (ext === ".csv") continue; // CSVs are provisional metadata only; never embedded into IRS PDFs
+
     const rawBytes = await fs.readFile(src.filePath);
 
     if (ext === ".pdf") {
       const srcDoc = await PDFDocument.load(rawBytes);
       const totalPages = srcDoc.getPageCount();
       const uniqueValidPages = Array.from(new Set(src.pagesToInclude)).filter(
-        (p) => p >= 0 && p < totalPages
+        (p) => {
+          if (p < 0 || p >= totalPages) return false;
+          const key = `${src.filePath}::${p}`;
+          if (seenPages.has(key)) return false;
+          seenPages.add(key);
+          return true;
+        }
       );
-      const copiedPages = await mergedPdf.copyPages(srcDoc, uniqueValidPages);
-      copiedPages.forEach((p) => mergedPdf.addPage(p));
+      if (uniqueValidPages.length > 0) {
+        const copiedPages = await mergedPdf.copyPages(srcDoc, uniqueValidPages);
+        copiedPages.forEach((p) => mergedPdf.addPage(p));
+      }
     } else {
+      const key = `${src.filePath}::0`;
+      if (seenPages.has(key)) continue;
+      seenPages.add(key);
+
       const pngBytes = await sharp(rawBytes).png().toBuffer();
       const img = await mergedPdf.embedPng(pngBytes);
       const page = mergedPdf.addPage([612, 792]);
@@ -306,15 +458,16 @@ async function buildSlicedPdf(
     }
   }
 
-  const pdfBytes = await mergedPdf.save();
-  await fs.writeFile(outputPath, pdfBytes);
+  if (mergedPdf.getPageCount() > 0) {
+    const pdfBytes = await mergedPdf.save();
+    await fs.writeFile(outputPath, pdfBytes);
+  }
 }
 
 async function lookupDriveLink(fileName: string): Promise<string> {
   const escapedName = fileName.replace(/'/g, "\\'");
   const q = `name = '${escapedName}' and trashed = false`;
 
-  // Retry up to 10 times (30s total) for Google Drive for Desktop to upload the new PDF
   for (let attempt = 0; attempt < 10; attempt++) {
     const res = await drive.files.list({
       q,
@@ -337,17 +490,57 @@ function sanitizeProvider(name: string): string {
   return name.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
+function matchInstallmentPlan(
+  claim: ExtractedClaim,
+  plans: InstallmentPlan[]
+): InstallmentPlan | undefined {
+  if (claim.installmentPlanId) {
+    const byId = plans.find((p) => p.planId === claim.installmentPlanId);
+    if (byId) return byId;
+  }
+  const tokens = (s: string) =>
+    s
+      .toUpperCase()
+      .split(/[^A-Z0-9]+/)
+      .filter((t) => t.length >= 2);
+  const cTokens = new Set(tokens(claim.provider));
+  return plans.find((p) => {
+    const aliases = [
+      p.provider,
+      ...(p.affiliatedProviders ? p.affiliatedProviders.split(",") : []),
+    ]
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const aliasMatch = aliases.some((a) => {
+      const aTokens = tokens(a);
+      return aTokens.length > 0 && aTokens.every((t) => cTokens.has(t));
+    });
+    return (
+      aliasMatch ||
+      Math.abs(claim.qualifiedOutOfPocketAmount - p.totalResponsibility) <
+        0.01 ||
+      Math.abs(claim.qualifiedOutOfPocketAmount - p.monthlyPayment) < 0.01
+    );
+  });
+}
+
 async function cleanupReferencePool(
   spreadsheetId: string,
-  cache: Record<string, ParsedFileMetadata>
+  cache: Record<string, ParsedFileMetadata>,
+  installmentPlans: InstallmentPlan[]
 ) {
   const sheetRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `'${SHEET_TAB}'!B10:R200`,
+    range: `'${SHEET_TAB}'!B10:R250`,
   });
   const latestRows = sheetRes.data.values || [];
 
   const isClaimCompleteInSheet = (claim: ExtractedClaim): boolean => {
+    const plan = matchInstallmentPlan(claim, installmentPlans);
+    if (plan && plan.remainingBalance > 0) {
+      return false; // Keep installment EOBs in Reference-Pool while the plan has a remaining balance
+    }
+
     return latestRows.some((row) => {
       const rowPatient = row[3];
       const rowBilled = parseFloat(
@@ -356,13 +549,12 @@ async function cleanupReferencePool(
       const rowQualified = parseFloat(
         (row[8] || "0").toString().replace(/[$,]/g, "")
       );
-      const rowAuditStatus = row[12]; // Column N (0-indexed from Column B = index 12)
+      const rowAuditStatus = row[12];
       const rowNotes = (row[16] || "").toString();
 
       const amountMatches =
         Math.abs(rowQualified - claim.qualifiedOutOfPocketAmount) < 0.01 ||
-        Math.abs(rowBilled - claim.billedOrEobAmount) < 0.01;
-
+        Math.abs(rowBilled - claim.qualifiedOutOfPocketAmount) < 0.01;
       const claimNumMatches =
         claim.claimNumber && rowNotes.includes(claim.claimNumber);
 
@@ -376,14 +568,19 @@ async function cleanupReferencePool(
 
   const poolFiles = await fs.readdir(POOL_DIR);
   for (const fileName of poolFiles) {
-    if (!/\.(pdf|png|jpg|jpeg)$/i.test(fileName)) continue;
+    if (!/\.(pdf|png|jpg|jpeg|csv)$/i.test(fileName)) continue;
     const poolFilePath = path.join(POOL_DIR, fileName);
-    const meta = await parseDocumentWithGemini(poolFilePath, undefined, cache);
+    const meta = await parseDocumentWithGemini(
+      poolFilePath,
+      undefined,
+      cache,
+      installmentPlans
+    );
+    if (meta.docType === "TRANSACTION_CSV") continue;
 
     const actionableClaims = meta.claims.filter(
       (c) => c.qualifiedOutOfPocketAmount > 0
     );
-
     const allClaimsComplete =
       actionableClaims.length > 0 &&
       actionableClaims.every((c) => isClaimCompleteInSheet(c));
@@ -433,7 +630,18 @@ async function runSync() {
   await fs.mkdir(RECEIPTS_ROOT_DIR, { recursive: true });
 
   const spreadsheetId = await resolveSpreadsheetId();
-  const cache = await loadCache();
+  const [sheetRes, installmentData, cache] = await Promise.all([
+    sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${SHEET_TAB}'!B10:R250`,
+    }),
+    loadInstallmentTab(spreadsheetId),
+    loadCache(),
+  ]);
+  const existingRows = sheetRes.data.values || [];
+  const { plans: installmentPlans, schedule: installmentSchedule } =
+    installmentData;
+
   const entries = await fs.readdir(INBOX_DIR, { withFileTypes: true });
   const parsedDocs: ParsedFileMetadata[] = [];
 
@@ -444,28 +652,39 @@ async function runSync() {
     if (entry.isDirectory()) {
       const subFiles = await fs.readdir(fullPath);
       for (const sf of subFiles) {
-        if (/\.(pdf|png|jpg|jpeg)$/i.test(sf)) {
+        if (/\.(pdf|png|jpg|jpeg|csv)$/i.test(sf)) {
           parsedDocs.push(
             await parseDocumentWithGemini(
               path.join(fullPath, sf),
               entry.name,
-              cache
+              cache,
+              installmentPlans
             )
           );
         }
       }
-    } else if (/\.(pdf|png|jpg|jpeg)$/i.test(entry.name)) {
+    } else if (/\.(pdf|png|jpg|jpeg|csv)$/i.test(entry.name)) {
       parsedDocs.push(
-        await parseDocumentWithGemini(fullPath, undefined, cache)
+        await parseDocumentWithGemini(
+          fullPath,
+          undefined,
+          cache,
+          installmentPlans
+        )
       );
     }
   }
 
   const poolEntries = await fs.readdir(POOL_DIR);
   for (const pe of poolEntries) {
-    if (/\.(pdf|png|jpg|jpeg)$/i.test(pe)) {
+    if (/\.(pdf|png|jpg|jpeg|csv)$/i.test(pe)) {
       parsedDocs.push(
-        await parseDocumentWithGemini(path.join(POOL_DIR, pe), undefined, cache)
+        await parseDocumentWithGemini(
+          path.join(POOL_DIR, pe),
+          undefined,
+          cache,
+          installmentPlans
+        )
       );
     }
   }
@@ -477,13 +696,71 @@ async function runSync() {
 
   interface ClaimBundle {
     key: string;
+    plan?: InstallmentPlan;
+    matchedScheduleRow?: InstallmentScheduleRow;
     claims: { doc: ParsedFileMetadata; claim: ExtractedClaim }[];
   }
   const bundles: ClaimBundle[] = [];
+  const installmentEobs = new Map<
+    string,
+    { doc: ParsedFileMetadata; claim: ExtractedClaim }[]
+  >();
+  const installmentPayments: {
+    plan: InstallmentPlan;
+    doc: ParsedFileMetadata;
+    claim: ExtractedClaim;
+  }[] = [];
 
+  // 1. Group EOBs & Payments into either Installment Plan buckets or standard bundles
   for (const doc of parsedDocs) {
     for (const claim of doc.claims) {
       if (claim.qualifiedOutOfPocketAmount <= 0) continue;
+
+      const plan = !doc.subfolderGroup
+        ? matchInstallmentPlan(claim, installmentPlans)
+        : undefined;
+
+      if (plan) {
+        const isPaymentOnly =
+          !claim.provesMedicalNecessity &&
+          (doc.docType === "PAYMENT_RECEIPT" ||
+            doc.docType === "CC_STATEMENT" ||
+            doc.docType === "TRANSACTION_CSV" ||
+            claim.provesPayment);
+
+        if (isPaymentOnly) {
+          installmentPayments.push({ plan, doc, claim });
+        } else {
+          const list = installmentEobs.get(plan.planId) || [];
+          // Deduplicate identical claim numbers across duplicate EOB files
+          if (
+            !claim.claimNumber ||
+            !list.some((e) => e.claim.claimNumber === claim.claimNumber)
+          ) {
+            list.push({ doc, claim });
+            installmentEobs.set(plan.planId, list);
+          }
+        }
+        continue;
+      }
+
+      // Skip standalone CSV/CC rows that don't match an EOB or an active installment plan
+      if (
+        (doc.docType === "TRANSACTION_CSV" || doc.docType === "CC_STATEMENT") &&
+        !claim.provesMedicalNecessity
+      ) {
+        const matchesSomeEob = parsedDocs.some((d) =>
+          d.claims.some(
+            (c) =>
+              c.provesMedicalNecessity &&
+              c.patient === claim.patient &&
+              Math.abs(
+                c.qualifiedOutOfPocketAmount - claim.qualifiedOutOfPocketAmount
+              ) < 0.01
+          )
+        );
+        if (!matchesSomeEob) continue;
+      }
 
       const matchKey = doc.subfolderGroup
         ? `SUBFOLDER:${doc.subfolderGroup}`
@@ -494,18 +771,56 @@ async function runSync() {
         bundle = { key: matchKey, claims: [] };
         bundles.push(bundle);
       }
-      bundle.claims.push({ doc, claim });
+      // Avoid adding duplicate claim numbers from duplicate EOB files
+      if (
+        !claim.claimNumber ||
+        !bundle.claims.some((c) => c.claim.claimNumber === claim.claimNumber)
+      ) {
+        bundle.claims.push({ doc, claim });
+      }
     }
   }
 
-  const sheetRes = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: `'${SHEET_TAB}'!B10:R200`,
-  });
-  const existingRows = sheetRes.data.values || [];
+  // 2. Build a bundle for each matched Installment Plan payment paired with that plan's EOBs
+  for (const pmt of installmentPayments) {
+    const planEobs = installmentEobs.get(pmt.plan.planId) || [];
+    const payDate = pmt.claim.datePaid || pmt.claim.dateOfService;
+    if (
+      Math.abs(
+        pmt.claim.qualifiedOutOfPocketAmount - pmt.plan.monthlyPayment
+      ) >= 0.05 &&
+      !installmentSchedule.some(
+        (s) =>
+          s.provider.toUpperCase() === pmt.plan.provider.toUpperCase() &&
+          Math.abs(s.paymentAmount - pmt.claim.qualifiedOutOfPocketAmount) < 0.05
+      )
+    ) {
+      continue;
+    }
+    const matchedSched = installmentSchedule.find(
+      (s) =>
+        s.provider.toUpperCase() === pmt.plan.provider.toUpperCase() &&
+        Math.abs(s.paymentAmount - pmt.claim.qualifiedOutOfPocketAmount) <
+          0.05 &&
+        Math.abs(
+          new Date(s.scheduledDate).getTime() - new Date(payDate).getTime()
+        ) <=
+          10 * 86400000
+    );
+
+    bundles.push({
+      key: `INSTALLMENT:${pmt.plan.planId}_${payDate}_${pmt.claim.qualifiedOutOfPocketAmount.toFixed(2)}`,
+      plan: pmt.plan,
+      matchedScheduleRow: matchedSched,
+      claims: [...planEobs, { doc: pmt.doc, claim: pmt.claim }],
+    });
+  }
+
+  let nextAppendOffset = existingRows.length;
+
+  const filesToMove = new Map<string, string>();
 
   for (const bundle of bundles) {
-    // Order claims so EOBs/Invoices come before payment receipts/statements
     const orderedClaims = [...bundle.claims].sort((a, b) => {
       const aIsMed =
         a.doc.docType === "EOB" ||
@@ -519,62 +834,137 @@ async function runSync() {
     });
 
     const primary = orderedClaims[0].claim;
+    const payClaim = orderedClaims.find((c) => c.claim.provesPayment)?.claim;
+    const dateOfService = primary.dateOfService;
+    const datePaid =
+      payClaim?.datePaid ||
+      (payClaim ? payClaim.dateOfService : "") ||
+      orderedClaims.find((c) => c.claim.datePaid)?.claim.datePaid ||
+      "";
+    const payMethod = datePaid
+      ? orderedClaims.find(
+          (c) => c.claim.paymentMethod && c.claim.paymentMethod !== "Unknown"
+        )?.claim.paymentMethod || DEFAULT_PAYMENT_METHOD
+      : "";
+
     const hasEobOrInvoice = orderedClaims.some(
       (c) =>
         c.claim.provesMedicalNecessity ||
         c.doc.docType === "EOB" ||
         c.doc.docType === "BILL_OR_INVOICE"
     );
-    const hasReceiptOrStatement = orderedClaims.some(
+    const hasPdfPaymentProof = orderedClaims.some(
       (c) =>
-        c.claim.provesPayment ||
-        c.doc.docType === "PAYMENT_RECEIPT" ||
-        c.doc.docType === "CC_STATEMENT"
+        c.doc.docType !== "TRANSACTION_CSV" &&
+        (c.claim.provesPayment ||
+          c.doc.docType === "PAYMENT_RECEIPT" ||
+          c.doc.docType === "CC_STATEMENT")
     );
+    const hasCsvPaymentProof = orderedClaims.some(
+      (c) => c.doc.docType === "TRANSACTION_CSV" && c.claim.provesPayment
+    );
+    // CSV is only final audit proof for HSA Card distributions (backed by custodian 1099-SA + EOB PDF).
+    // Out-of-pocket Amex/Checking CSV rows remain Receipt=No until an official PDF statement/receipt is matched.
+    const hasReceiptOrStatement =
+      hasPdfPaymentProof || (hasCsvPaymentProof && payMethod === "HSA Card");
     const isBundleComplete = hasEobOrInvoice && hasReceiptOrStatement;
 
-    const existingRowIndex = existingRows.findIndex(
-      (r) =>
-        r[3] === primary.patient &&
-        parseFloat((r[8] || "0").toString().replace(/[$,]/g, "")) ===
-          primary.qualifiedOutOfPocketAmount
-    );
+    const patient =
+      bundle.plan && bundle.plan.patient !== "Family"
+        ? bundle.plan.patient
+        : primary.patient;
+    const provider = bundle.plan ? bundle.plan.provider : primary.provider;
+    const outOfPocketAmount =
+      bundle.plan && payClaim
+        ? payClaim.qualifiedOutOfPocketAmount
+        : primary.qualifiedOutOfPocketAmount;
+    const billedAmount = bundle.plan
+      ? bundle.plan.totalResponsibility
+      : Math.max(...orderedClaims.map((c) => c.claim.billedOrEobAmount || 0));
+    const description = bundle.plan
+      ? bundle.matchedScheduleRow
+        ? `${bundle.matchedScheduleRow.paymentId}: ${bundle.matchedScheduleRow.notes}`
+        : `0% Installment Plan Payment (${bundle.plan.planId})`
+      : primary.description;
 
-    // Skip re-processing if all docs in this bundle are already sitting in Reference-Pool
-    // and the staged sheet row already reflects the exact same completion state.
+    const existingRowIndex = existingRows.findIndex((r) => {
+      const rDos = (r[1] || "").toString().trim();
+      const rPaidDate = (r[2] || "").toString().trim();
+      const rPat = (r[3] || "").toString().trim();
+      const rAmt = parseFloat((r[8] || "0").toString().replace(/[$,]/g, ""));
+      const rNotes = (r[16] || "").toString();
+
+      if (bundle.plan) {
+        return (
+          rPaidDate === datePaid &&
+          Math.abs(rAmt - outOfPocketAmount) < 0.01 &&
+          (r[4] || "").toString().toUpperCase() === provider.toUpperCase()
+        );
+      }
+      if (primary.claimNumber && rNotes.includes(primary.claimNumber)) {
+        return true;
+      }
+      return (
+        rPat === patient &&
+        Math.abs(rAmt - outOfPocketAmount) < 0.01 &&
+        (!rDos || rDos === dateOfService)
+      );
+    });
+
     const allInPool = orderedClaims.every(
       (c) => path.dirname(c.doc.filePath) === POOL_DIR
     );
+    const hasNewInboxSingleDoc = orderedClaims.some(
+      (c) =>
+        path.dirname(c.doc.filePath) !== POOL_DIR &&
+        !c.doc.isMultiClaimOrStatement
+    );
+    if (
+      existingRowIndex >= 0 &&
+      existingRows[existingRowIndex][12] === "Complete" &&
+      !hasNewInboxSingleDoc
+    ) {
+      continue;
+    }
+    if (allInPool && existingRowIndex < 0 && !payClaim) {
+      // Unmatched EOBs already sitting in Reference-Pool stay in Reference-Pool until a matching payment arrives
+      continue;
+    }
     if (allInPool && existingRowIndex >= 0) {
       const existingRow = existingRows[existingRowIndex];
-      const existingMed = existingRow[10] === "Yes";
-      const existingRec = existingRow[11] === "Yes";
       if (
-        existingMed === hasEobOrInvoice &&
-        existingRec === hasReceiptOrStatement
+        existingRow[10] === (hasEobOrInvoice ? "Yes" : "No") &&
+        existingRow[11] === (hasReceiptOrStatement ? "Yes" : "No") &&
+        (existingRow[9] || "") === payMethod
       ) {
         continue;
       }
     }
 
-    const amountStr = primary.qualifiedOutOfPocketAmount.toFixed(2);
-    const pdfFileName = `${primary.dateOfService}_${sanitizeProvider(
-      primary.provider
-    )}_${primary.patient}_$${amountStr}.pdf`;
+    const amountStr = outOfPocketAmount.toFixed(2);
+    const pdfDate = bundle.plan && datePaid ? datePaid : dateOfService;
+    const pdfFileName = `${pdfDate}_${sanitizeProvider(
+      provider
+    )}_${patient}_$${amountStr}.pdf`;
     const serviceYear =
-      primary.dateOfService.slice(0, 4) || new Date().getFullYear().toString();
+      pdfDate.slice(0, 4) || new Date().getFullYear().toString();
     const yearReceiptsDir = path.join(RECEIPTS_ROOT_DIR, serviceYear);
     await fs.mkdir(yearReceiptsDir, { recursive: true });
     const outputPdfPath = path.join(yearReceiptsDir, pdfFileName);
 
-    const slicePlan = orderedClaims.map((c) => ({
-      fileName: c.doc.fileName,
-      filePath: c.doc.filePath,
-      pagesToInclude: [c.claim.headerPageIndex, ...c.claim.relevantPageIndices],
-    }));
+    const slicePlan = orderedClaims
+      .filter((c) => c.doc.docType !== "TRANSACTION_CSV")
+      .map((c) => ({
+        fileName: c.doc.fileName,
+        filePath: c.doc.filePath,
+        pagesToInclude: [
+          c.claim.headerPageIndex,
+          ...c.claim.relevantPageIndices,
+        ],
+      }));
 
     const targetSheetRow =
-      existingRowIndex >= 0 ? 10 + existingRowIndex : 10 + existingRows.length;
+      existingRowIndex >= 0 ? 10 + existingRowIndex : 10 + nextAppendOffset++;
 
     console.log("\n========================================");
     console.log(`${DRY_RUN ? "[DRY-RUN] " : ""}Bundle: ${bundle.key}`);
@@ -600,29 +990,24 @@ async function runSync() {
     );
 
     if (!DRY_RUN) {
-      await buildSlicedPdf(slicePlan, outputPdfPath);
+      const prependExisting =
+        existingRowIndex >= 0 &&
+        existingRows[existingRowIndex][12] === "Complete" &&
+        hasNewInboxSingleDoc;
+      await buildSlicedPdf(slicePlan, outputPdfPath, prependExisting);
       const webViewLink = await lookupDriveLink(pdfFileName);
       const linkFormula = webViewLink
         ? `=HYPERLINK("${webViewLink}", "${pdfFileName}")`
         : pdfFileName;
 
-      const payMethod =
-        orderedClaims.find(
-          (c) => c.claim.paymentMethod && c.claim.paymentMethod !== "Unknown"
-        )?.claim.paymentMethod || DEFAULT_PAYMENT_METHOD;
       const reimbStatus =
         payMethod === "HSA Card"
           ? "Paid via HSA Directly"
-          : "Unreimbursed (Vaulted)";
-      const datePaid =
-        orderedClaims.find((c) => c.claim.datePaid)?.claim.datePaid || "";
+          : "Unreimbursed - Vaulted";
       const combinedNotes = orderedClaims
         .map((c) => c.claim.notes)
         .filter(Boolean)
         .join("; ");
-      const maxBilledAmount = Math.max(
-        ...orderedClaims.map((c) => c.claim.billedOrEobAmount || 0)
-      );
 
       await sheets.spreadsheets.values.batchUpdate({
         spreadsheetId,
@@ -633,14 +1018,14 @@ async function runSync() {
               range: `'${SHEET_TAB}'!C${targetSheetRow}:M${targetSheetRow}`,
               values: [
                 [
-                  primary.dateOfService,
+                  dateOfService,
                   datePaid,
-                  primary.patient,
-                  primary.provider,
+                  patient,
+                  provider,
                   primary.category,
-                  primary.description,
-                  maxBilledAmount,
-                  primary.qualifiedOutOfPocketAmount,
+                  description,
+                  billedAmount,
+                  outOfPocketAmount,
                   payMethod,
                   hasEobOrInvoice ? "Yes" : "No",
                   hasReceiptOrStatement ? "Yes" : "No",
@@ -649,26 +1034,72 @@ async function runSync() {
             },
             {
               range: `'${SHEET_TAB}'!O${targetSheetRow}:R${targetSheetRow}`,
-              values: [[reimbStatus, "", linkFormula, combinedNotes]],
+              values: [
+                [
+                  reimbStatus,
+                  payMethod === "HSA Card" ? datePaid : "",
+                  linkFormula,
+                  combinedNotes,
+                ],
+              ],
             },
           ],
         },
       });
 
+      if (
+        bundle.matchedScheduleRow &&
+        bundle.matchedScheduleRow.status !== "Paid"
+      ) {
+        const schedRow = bundle.matchedScheduleRow.rowIndex;
+        await sheets.spreadsheets.values.update({
+          spreadsheetId,
+          range: `'${INSTALLMENT_TAB}'!H${schedRow}`,
+          valueInputOption: "USER_ENTERED",
+          requestBody: { values: [["Paid"]] },
+        });
+      }
+
       for (const item of orderedClaims) {
         const destDir =
-          item.doc.isMultiClaimOrStatement || !isBundleComplete
+          item.doc.isMultiClaimOrStatement ||
+          item.doc.docType === "TRANSACTION_CSV" ||
+          Boolean(bundle.plan) ||
+          !isBundleComplete
             ? POOL_DIR
             : ARCHIVE_DIR;
         const destPath = path.join(destDir, item.doc.fileName);
-        if (item.doc.filePath !== destPath) {
-          await fs.rename(item.doc.filePath, destPath).catch(() => {});
+        if (
+          item.doc.filePath !== destPath &&
+          filesToMove.get(item.doc.filePath) !== path.join(POOL_DIR, item.doc.fileName)
+        ) {
+          filesToMove.set(item.doc.filePath, destPath);
         }
       }
     }
   }
 
-  await cleanupReferencePool(spreadsheetId, cache);
+  if (!DRY_RUN) {
+    for (const doc of parsedDocs) {
+      if (
+        path.dirname(doc.filePath) === INBOX_DIR &&
+        !filesToMove.has(doc.filePath)
+      ) {
+        const destDir =
+          doc.isMultiClaimOrStatement ||
+          doc.docType === "CC_STATEMENT" ||
+          doc.docType === "TRANSACTION_CSV"
+            ? POOL_DIR
+            : ARCHIVE_DIR;
+        filesToMove.set(doc.filePath, path.join(destDir, doc.fileName));
+      }
+    }
+    for (const [srcPath, destPath] of filesToMove.entries()) {
+      await fs.rename(srcPath, destPath).catch(() => {});
+    }
+  }
+
+  await cleanupReferencePool(spreadsheetId, cache, installmentPlans);
 }
 
 if (WATCH_MODE) {

@@ -4,12 +4,12 @@ An automated medical document parser, PDF slicer/merger, and Google Sheets track
 
 ## Overview
 
-`HSA Automator` monitors an `Inbox` directory for medical documents—such as Explanation of Benefits (EOBs), itemized medical/dental/vision bills, pharmacy prescription slips, payment receipts, and credit card statements—and automatically:
+`HSA Automator` monitors an `Inbox` directory for medical documents—such as Explanation of Benefits (EOBs), itemized medical/dental/vision bills, pharmacy prescription slips, payment receipts, credit card statements, and CSV transaction exports—and automatically:
 
 1. **Extracts Claim Details with Gemini**: Uses Google's `@google/genai` structured output to extract patient name, provider, service/payment dates, category (`Medical`, `Dental`, `Vision`, `Prescription`), billed vs. qualified out-of-pocket amounts (excluding non-qualified items like warranties), page indices, and a concise IRS audit memo.
-2. **Matches & Bundles Supporting Docs**: Groups related EOBs, bills, and payment receipts/statements by claim or subfolder and slices/merges only the relevant pages (plus header pages) into a single, standardized PDF (`YYYY-MM-DD_Provider_Patient_$Amount.pdf`).
-3. **Syncs to Google Sheets & Google Drive**: Uploads/resolves the Google Drive `webViewLink` for each generated receipt PDF and writes or updates the corresponding row in your Google Sheets tracker with a clickable `=HYPERLINK(...)` formula and audit status metrics.
-4. **Manages Multi-Claim Reference Pool & Archive**: Moves single-claim documents to `Archive` after processing, retains multi-claim EOBs or credit card statements in `Inbox/Reference-Pool` until all claims are resolved, and automatically retires completed pool documents.
+2. **Matches & Bundles Supporting Docs (Including 0% Installment Plans)**: Groups related EOBs, bills, and payment receipts/statements by claim, subfolder, or active installment plan (from the `0% Installment Plans` tab) and slices/merges only the relevant pages (plus header pages) into a single, standardized PDF (`YYYY-MM-DD_Provider_Patient_$Amount.pdf`).
+3. **Syncs to Google Sheets & Google Drive**: Uploads/resolves the Google Drive `webViewLink` for each generated receipt PDF, writes or updates the corresponding row in your Google Sheets tracker with a clickable `=HYPERLINK(...)` formula and audit status metrics, and marks matched scheduled installment payments as `Paid`.
+4. **Manages Multi-Claim Reference Pool & Archive**: Moves single-claim documents to `Archive` after processing, retains multi-claim EOBs, active installment plan EOBs, or credit card statements in `Inbox/Reference-Pool` until all claims/installments are resolved, and automatically retires completed pool documents.
 
 ---
 
@@ -59,12 +59,13 @@ cp .env.example .env
 | :--- | :--- |
 | `GEMINI_API_KEY` | Google AI Studio API key (Paid Tier recommended so prompts/documents are not logged). |
 | `SHEET_TAB_NAME` | Tab name in your Google Sheet (default: `HSA Expense Tracker`). |
+| `INSTALLMENT_TAB_NAME` | *(Optional)* Tab name for tracking 0% installment plans and payment schedules (default: `0% Installment Plans`). |
 | `SPREADSHEET_ID` | *(Optional)* Google Spreadsheet ID. If omitted, resolved automatically by title. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to your Google Service Account JSON key file. |
 | `MEDICAL_ROOT_DIR` | Local path to your HSA root directory containing `Inbox`, `Archive`, and `Receipts`. |
 | `HOUSEHOLD_MEMBERS` | Comma-separated list of patient names for schema validation (e.g., `Alice,Bob,Charlie`). |
 | `HOUSEHOLD_PROMPT_NAMES` | Natural-language list of household members for the extraction prompt. |
-| `PAYMENT_METHODS` | Comma-separated list of payment methods (e.g., `Credit Card,Checking,HSA Card,Unknown`). |
+| `PAYMENT_METHODS` | Comma-separated list of payment methods (e.g., `Credit Card,PayPal,Checking,HSA Card,Unknown`). |
 | `DEFAULT_PAYMENT_METHOD` | Fallback payment method when none is explicitly detected. |
 
 ---
