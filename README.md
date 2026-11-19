@@ -33,7 +33,7 @@ Point `MEDICAL_ROOT_DIR` in your `.env` to a local folder (ideally synced via Go
 
 ### 1. Install Dependencies
 
-Requires **Node.js v20+**.
+Requires **Node.js v26+**.
 
 ```bash
 npm install
