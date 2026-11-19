@@ -4,9 +4,9 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "sync": "tsx hsa-sync.ts",
-    "dry-run": "tsx hsa-sync.ts --dry-run",
-    "watch": "tsx hsa-sync.ts --watch"
+    "sync": "tsx src/hsa-sync.ts",
+    "dry-run": "tsx src/hsa-sync.ts --dry-run",
+    "watch": "tsx src/hsa-sync.ts --watch"
   },
   "dependencies": {
     "@google/genai": "^3.6.1",
