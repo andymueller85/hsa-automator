@@ -1,5 +1,12 @@
 import path from "path";
-import "dotenv/config";
+import dotenv from "dotenv";
+
+/* node:coverage disable */
+const isDemoArg = process.argv.includes("--demo");
+dotenv.config({
+  path: isDemoArg ? [".env.demo", ".env"] : [".env"],
+});
+/* node:coverage enable */
 
 export function parseConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -8,42 +15,63 @@ export function parseConfig(
 ) {
   const dryRun = argv.includes("--dry-run");
   const watchMode = argv.includes("--watch");
+  const demoMode = argv.includes("--demo") || env.DEMO_MODE === "true";
 
-  const rootDir = env.MEDICAL_ROOT_DIR || cwd;
+  const rootDir =
+    (demoMode && env.DEMO_MEDICAL_ROOT_DIR) ||
+    env.MEDICAL_ROOT_DIR ||
+    cwd;
   const inboxDir = path.join(rootDir, "Inbox");
   const poolDir = path.join(inboxDir, "Reference-Pool");
   const archiveDir = path.join(rootDir, "Archive");
   const receiptsRootDir = path.join(rootDir, "Receipts");
-  const cacheFile = path.join(cwd, ".hsa-cache.json");
+  const cacheFile =
+    env.CACHE_FILE ||
+    path.join(cwd, demoMode ? ".hsa-cache.demo.json" : ".hsa-cache.json");
 
-  const trackerTitle = "Medical Expense & HSA Reimbursement Tracker";
+  const trackerTitle =
+    (demoMode && env.DEMO_TRACKER_TITLE) ||
+    env.TRACKER_TITLE ||
+    (demoMode
+      ? "DEMO - Medical Expense & HSA Reimbursement Tracker"
+      : "Medical Expense & HSA Reimbursement Tracker");
   const sheetTab = env.SHEET_TAB_NAME || "HSA Expense Tracker";
   const installmentTab = env.INSTALLMENT_TAB_NAME || "0% Installment Plans";
   const ccPoolRetentionDays = 60;
 
   const householdMembers = (
-    env.HOUSEHOLD_MEMBERS || "Primary,Spouse,Dependent"
+    (demoMode && env.DEMO_HOUSEHOLD_MEMBERS) ||
+    (!demoMode && env.HOUSEHOLD_MEMBERS) ||
+    (demoMode ? "Homer,Marge,Bart,Lisa,Maggie" : "Primary,Spouse,Dependent")
   )
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 
   const householdPromptNames =
-    env.HOUSEHOLD_PROMPT_NAMES || householdMembers.join(", ");
+    (demoMode && env.DEMO_HOUSEHOLD_PROMPT_NAMES) ||
+    (!demoMode && env.HOUSEHOLD_PROMPT_NAMES) ||
+    householdMembers.join(", ");
 
   const paymentMethods = (
-    env.PAYMENT_METHODS || "Credit Card,Checking,HSA Card,Unknown"
+    (demoMode && env.DEMO_PAYMENT_METHODS) ||
+    (!demoMode && env.PAYMENT_METHODS) ||
+    "Credit Card,Checking,HSA Card,Unknown"
   )
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 
   const defaultPaymentMethod =
-    env.DEFAULT_PAYMENT_METHOD || paymentMethods[0] || "Credit Card";
+    (demoMode && env.DEMO_DEFAULT_PAYMENT_METHOD) ||
+    (!demoMode && env.DEFAULT_PAYMENT_METHOD) ||
+    paymentMethods[0] ||
+    "Credit Card";
 
   return {
     DRY_RUN: dryRun,
     WATCH_MODE: watchMode,
+    DEMO_MODE: demoMode,
     ROOT_DIR: rootDir,
     INBOX_DIR: inboxDir,
     POOL_DIR: poolDir,
@@ -65,6 +93,7 @@ const activeConfig = parseConfig();
 
 export const DRY_RUN = activeConfig.DRY_RUN;
 export const WATCH_MODE = activeConfig.WATCH_MODE;
+export const DEMO_MODE = activeConfig.DEMO_MODE;
 export const ROOT_DIR = activeConfig.ROOT_DIR;
 export const INBOX_DIR = activeConfig.INBOX_DIR;
 export const POOL_DIR = activeConfig.POOL_DIR;

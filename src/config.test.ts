@@ -60,4 +60,40 @@ describe("parseConfig", () => {
     assert.equal(cfgWithPromptNames.HOUSEHOLD_PROMPT_NAMES, "Custom Prompt List");
     assert.equal(cfgWithPromptNames.DEFAULT_PAYMENT_METHOD, "Credit Card");
   });
+
+  test("applies Simpsons demo defaults and DEMO_* overrides when --demo flag is passed", () => {
+    const demoCfg = parseConfig({}, ["node", "hsa-sync.ts", "--demo"], "/app");
+    assert.equal(demoCfg.DEMO_MODE, true);
+    assert.equal(
+      demoCfg.TRACKER_TITLE,
+      "DEMO - Medical Expense & HSA Reimbursement Tracker"
+    );
+    assert.equal(demoCfg.CACHE_FILE, path.join("/app", ".hsa-cache.demo.json"));
+    assert.deepEqual(demoCfg.HOUSEHOLD_MEMBERS, [
+      "Homer",
+      "Marge",
+      "Bart",
+      "Lisa",
+      "Maggie",
+    ]);
+
+    const customDemoCfg = parseConfig(
+      {
+        DEMO_MODE: "true",
+        DEMO_MEDICAL_ROOT_DIR: "/drive/hsa-demo",
+        DEMO_TRACKER_TITLE: "Custom Demo Sheet",
+        DEMO_HOUSEHOLD_MEMBERS: "Homer,Bart",
+        DEMO_HOUSEHOLD_PROMPT_NAMES: "Homer or Bart",
+        CACHE_FILE: "/custom/cache.json",
+      },
+      ["node", "hsa-sync.ts"],
+      "/app"
+    );
+    assert.equal(customDemoCfg.DEMO_MODE, true);
+    assert.equal(customDemoCfg.ROOT_DIR, "/drive/hsa-demo");
+    assert.equal(customDemoCfg.TRACKER_TITLE, "Custom Demo Sheet");
+    assert.equal(customDemoCfg.CACHE_FILE, "/custom/cache.json");
+    assert.deepEqual(customDemoCfg.HOUSEHOLD_MEMBERS, ["Homer", "Bart"]);
+    assert.equal(customDemoCfg.HOUSEHOLD_PROMPT_NAMES, "Homer or Bart");
+  });
 });

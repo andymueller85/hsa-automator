@@ -1,4 +1,9 @@
-import { INSTALLMENT_TAB, SHEET_TAB, TRACKER_TITLE } from "./config.js";
+import {
+  DEMO_MODE,
+  INSTALLMENT_TAB,
+  SHEET_TAB,
+  TRACKER_TITLE,
+} from "./config.js";
 import type {
   ClaimCategory,
   InstallmentPlan,
@@ -7,10 +12,19 @@ import type {
 
 export interface SheetsClientLike {
   spreadsheets: {
+    get?: (params: any) => Promise<{
+      data: {
+        sheets?: Array<{
+          properties?: { title?: string | null; sheetId?: number | null };
+        }> | null;
+      };
+    }>;
+    batchUpdate?: (params: any) => Promise<any>;
     values: {
       get: (params: any) => Promise<{ data: { values?: any[][] | null } }>;
       update: (params: any) => Promise<any>;
       batchUpdate: (params: any) => Promise<any>;
+      clear?: (params: any) => Promise<any>;
     };
   };
 }
@@ -41,14 +55,13 @@ export function setGoogleClients(clients: {
 }
 
 /* node:coverage disable */
-async function getGoogleClients(): Promise<{
+export async function getGoogleClients(): Promise<{
   sheets: SheetsClientLike;
   drive: DriveClientLike;
 }> {
   if (!cachedSheetsClient || !cachedDriveClient) {
     const { google } = await import("googleapis");
     const auth = new google.auth.GoogleAuth({
-      keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
       scopes: [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -61,7 +74,10 @@ async function getGoogleClients(): Promise<{
 }
 /* node:coverage enable */
 
-let cachedSpreadsheetId: string | null = process.env.SPREADSHEET_ID || null;
+let cachedSpreadsheetId: string | null =
+  (DEMO_MODE && process.env.DEMO_SPREADSHEET_ID) ||
+  process.env.SPREADSHEET_ID ||
+  null;
 
 export function resetCachedSpreadsheetId(value: string | null = null): void {
   cachedSpreadsheetId = value;
