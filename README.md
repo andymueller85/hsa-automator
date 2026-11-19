@@ -95,6 +95,27 @@ npm run watch
 
 ---
 
+## Live Simpsons Demo Mode
+
+Want to showcase `HSA Automator` to others using a live Google Sheet without touching your personal medical files or spreadsheet?
+
+1. **Create a Demo Google Sheet**: Make a copy of your tracker spreadsheet in Google Drive, name it `DEMO - Medical Expense & HSA Reimbursement Tracker`, and share it with your Service Account email as an **Editor**.
+2. **Create a Demo Drive Folder**: Create an `HSA-Demo` folder inside your Google Drive for Desktop directory, share it with your Service Account email, and set `DEMO_MEDICAL_ROOT_DIR` in `.env` (or `.env.demo`).
+3. **Reset & Generate Simpsons Demo Packets**:
+   ```bash
+   npm run demo:reset
+   ```
+   This wipes the demo `Inbox`, `Archive`, `Receipts`, and `.hsa-cache.demo.json`, clears rows `10:250` in the live Demo Google Sheet (while preserving formulas), seeds **"Lisa Needs Braces!" (`PLAN-001`)** on the `0% Installment Plans` tab, and generates 4 staged scenario packets in `<DEMO_MEDICAL_ROOT_DIR>/Demo-Packets/`:
+   * **`Packet-1_Homer-Nuclear-Injury`**: Multi-page EOB + multi-page Visa statement (demos page slicing & bundling).
+   * **`Packet-2_Bart-Vision-Warranty`**: Rendered PNG optical receipt with a $45 "Skateboarding Breakage Warranty" (demos automatic non-qualified expense exclusion).
+   * **`Packet-3_Lisa-Braces-Installment`**: Master Orthodontic EOB + monthly installment receipt (demos `PLAN-001` matching and flipping `PMT-002` to `Paid`).
+   * **`Packet-4_Marge-HSA-Card-Rx`**: Pharmacy prescription slip + HSA Bank CSV export (demos direct HSA Card compliance).
+4. **Run the Live Demo**:
+   * **Interactive Drag-and-Drop**: Run `npm run demo:watch` and drag packets from `Demo-Packets/` into `Inbox/` one at a time while watching the terminal and live Google Sheet update.
+   * **One-Shot Batch Demo**: Run `npm run demo:reset -- --populate-inbox` followed by `npm run demo:sync`.
+
+---
+
 ## Automated Scheduling (Windows Task Scheduler)
 
 To run the sync automatically every night at 9:00 PM in a hidden background window using `run-hsa-sync.ps1`, run the following in PowerShell:

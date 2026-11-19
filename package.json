@@ -7,8 +7,12 @@
     "sync": "tsx src/hsa-sync.ts",
     "dry-run": "tsx src/hsa-sync.ts --dry-run",
     "watch": "tsx src/hsa-sync.ts --watch",
-    "test": "tsx --test src/*.test.ts",
-    "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-exclude=\"src/*.test.ts\" src/*.test.ts"
+    "demo:reset": "tsx src/demo/demo.ts --demo",
+    "demo:sync": "tsx src/hsa-sync.ts --demo",
+    "demo:dry-run": "tsx src/hsa-sync.ts --demo --dry-run",
+    "demo:watch": "tsx src/hsa-sync.ts --demo --watch",
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-exclude=\"src/**/*.test.ts\" \"src/**/*.test.ts\""
   },
   "dependencies": {
     "@google/genai": "^3.6.1",
