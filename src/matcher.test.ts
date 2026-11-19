@@ -184,19 +184,38 @@ describe("buildClaimBundles", () => {
     assert.equal(bundles[0].claims.length, 2);
   });
 
-  test("deduplicates identical claim numbers across duplicate EOB files", () => {
+  test("deduplicates identical claim numbers across duplicate EOB files while bundling different docTypes sharing a claimNumber", () => {
     const eob1 = makeDoc({
       fileName: "eob-copy1.pdf",
+      docType: "EOB",
       claims: [makeClaim({ claimNumber: "DUP-999" })],
     });
     const eob2 = makeDoc({
       fileName: "eob-copy2.pdf",
+      docType: "EOB",
       claims: [makeClaim({ claimNumber: "DUP-999" })],
     });
+    const ccStatementWithSameClaimNumber = makeDoc({
+      fileName: "cc-statement.pdf",
+      docType: "CC_STATEMENT",
+      claims: [
+        makeClaim({
+          claimNumber: "DUP-999",
+          provesMedicalNecessity: false,
+          provesPayment: true,
+        }),
+      ],
+    });
 
-    const bundles = buildClaimBundles([eob1, eob2], [], []);
+    const bundles = buildClaimBundles(
+      [ccStatementWithSameClaimNumber, eob1, eob2],
+      [],
+      []
+    );
     assert.equal(bundles.length, 1);
-    assert.equal(bundles[0].claims.length, 1);
+    assert.equal(bundles[0].claims.length, 2);
+    assert.equal(bundles[0].claims[0].doc.docType, "CC_STATEMENT");
+    assert.equal(bundles[0].claims[1].doc.docType, "EOB");
   });
 
   test("skips $0 out-of-pocket claims and unmatched standalone CSV/CC rows", () => {

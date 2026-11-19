@@ -131,7 +131,11 @@ export function buildClaimBundles(
       // Avoid adding duplicate claim numbers from duplicate EOB files
       if (
         !claim.claimNumber ||
-        !bundle.claims.some((c) => c.claim.claimNumber === claim.claimNumber)
+        !bundle.claims.some(
+          (c) =>
+            c.claim.claimNumber === claim.claimNumber &&
+            c.doc.docType === doc.docType
+        )
       ) {
         bundle.claims.push({ doc, claim });
       }
