@@ -1,11 +1,29 @@
-export type ClaimCategory = "Medical" | "Dental" | "Vision" | "Prescription";
+export const CLAIM_CATEGORIES = [
+  "Medical",
+  "Dental",
+  "Vision",
+  "Prescription",
+] as const;
 
-export type DocType =
-  | "EOB"
-  | "BILL_OR_INVOICE"
-  | "PAYMENT_RECEIPT"
-  | "CC_STATEMENT"
-  | "TRANSACTION_CSV";
+export type ClaimCategory = (typeof CLAIM_CATEGORIES)[number];
+
+export const DOC_TYPES = [
+  "EOB",
+  "BILL_OR_INVOICE",
+  "PAYMENT_RECEIPT",
+  "CC_STATEMENT",
+  "TRANSACTION_CSV",
+] as const;
+
+export type DocType = (typeof DOC_TYPES)[number];
+
+export function isSupportedDocType(value: string): value is DocType {
+  return (DOC_TYPES as readonly string[]).includes(value);
+}
+
+export function isClaimCategory(value: string): value is ClaimCategory {
+  return (CLAIM_CATEGORIES as readonly string[]).includes(value);
+}
 
 export interface ExtractedClaim {
   claimNumber?: string;

@@ -6,7 +6,9 @@
   "scripts": {
     "sync": "tsx src/hsa-sync.ts",
     "dry-run": "tsx src/hsa-sync.ts --dry-run",
-    "watch": "tsx src/hsa-sync.ts --watch"
+    "watch": "tsx src/hsa-sync.ts --watch",
+    "test": "tsx --test src/*.test.ts",
+    "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-exclude=\"src/*.test.ts\" src/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^3.6.1",

@@ -7,6 +7,20 @@ import type {
   ParsedFileMetadata,
 } from "./types.js";
 
+export function sortBundleClaims(claims: ClaimBundleItem[]): ClaimBundleItem[] {
+  return [...claims].sort((a, b) => {
+    const aIsMed =
+      a.doc.docType === "EOB" ||
+      a.doc.docType === "BILL_OR_INVOICE" ||
+      a.claim.provesMedicalNecessity;
+    const bIsMed =
+      b.doc.docType === "EOB" ||
+      b.doc.docType === "BILL_OR_INVOICE" ||
+      b.claim.provesMedicalNecessity;
+    return aIsMed === bIsMed ? 0 : aIsMed ? -1 : 1;
+  });
+}
+
 export function matchInstallmentPlan(
   claim: ExtractedClaim,
   plans: InstallmentPlan[]

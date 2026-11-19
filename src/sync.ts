@@ -16,43 +16,50 @@ import {
   markInstallmentPaid,
   resolveSpreadsheetId,
   upsertExpenseRow,
+  type ExpenseRowUpsertParams,
 } from "./google.js";
-import { buildClaimBundles, findExistingExpenseRowIndex } from "./matcher.js";
+import {
+  buildClaimBundles,
+  findExistingExpenseRowIndex,
+  sortBundleClaims,
+} from "./matcher.js";
 import { buildSlicedPdf, sanitizeProvider } from "./pdf.js";
 import { cleanupReferencePool, scanDocuments } from "./pool.js";
-import type {
-  ClaimBundle,
-  ClaimBundleItem,
-  ParsedFileMetadata,
-} from "./types.js";
+import type { ClaimBundle, ParsedFileMetadata } from "./types.js";
 
-function sortBundleClaims(claims: ClaimBundleItem[]): ClaimBundleItem[] {
-  return [...claims].sort((a, b) => {
-    const aIsMed =
-      a.doc.docType === "EOB" ||
-      a.doc.docType === "BILL_OR_INVOICE" ||
-      a.claim.provesMedicalNecessity;
-    const bIsMed =
-      b.doc.docType === "EOB" ||
-      b.doc.docType === "BILL_OR_INVOICE" ||
-      b.claim.provesMedicalNecessity;
-    return aIsMed === bIsMed ? 0 : aIsMed ? -1 : 1;
-  });
-}
-
-async function processBundle(params: {
+export interface ProcessBundleParams {
   bundle: ClaimBundle;
   spreadsheetId: string;
   existingRows: any[][];
   getNextAppendRow: () => number;
   filesToMove: Map<string, string>;
-}): Promise<void> {
+  poolDir?: string;
+  archiveDir?: string;
+  receiptsRootDir?: string;
+  dryRun?: boolean;
+  buildPdfFn?: typeof buildSlicedPdf;
+  lookupDriveLinkFn?: (fileName: string) => Promise<string>;
+  upsertRowFn?: (params: ExpenseRowUpsertParams) => Promise<void>;
+  markPaidFn?: (spreadsheetId: string, rowIndex: number) => Promise<void>;
+}
+
+export async function processBundle(
+  params: ProcessBundleParams
+): Promise<void> {
   const {
     bundle,
     spreadsheetId,
     existingRows,
     getNextAppendRow,
     filesToMove,
+    poolDir = POOL_DIR,
+    archiveDir = ARCHIVE_DIR,
+    receiptsRootDir = RECEIPTS_ROOT_DIR,
+    dryRun = DRY_RUN,
+    buildPdfFn = buildSlicedPdf,
+    lookupDriveLinkFn = lookupDriveLink,
+    upsertRowFn = upsertExpenseRow,
+    markPaidFn = markInstallmentPaid,
   } = params;
 
   const orderedClaims = sortBundleClaims(bundle.claims);
@@ -121,11 +128,11 @@ async function processBundle(params: {
   });
 
   const allInPool = orderedClaims.every(
-    (c) => path.dirname(c.doc.filePath) === POOL_DIR
+    (c) => path.dirname(c.doc.filePath) === poolDir
   );
   const hasNewInboxSingleDoc = orderedClaims.some(
     (c) =>
-      path.dirname(c.doc.filePath) !== POOL_DIR &&
+      path.dirname(c.doc.filePath) !== poolDir &&
       !c.doc.isMultiClaimOrStatement
   );
 
@@ -158,7 +165,7 @@ async function processBundle(params: {
   )}_${patient}_$${amountStr}.pdf`;
   const serviceYear =
     pdfDate.slice(0, 4) || new Date().getFullYear().toString();
-  const yearReceiptsDir = path.join(RECEIPTS_ROOT_DIR, serviceYear);
+  const yearReceiptsDir = path.join(receiptsRootDir, serviceYear);
   await fs.mkdir(yearReceiptsDir, { recursive: true });
   const outputPdfPath = path.join(yearReceiptsDir, pdfFileName);
 
@@ -177,7 +184,7 @@ async function processBundle(params: {
     existingRowIndex >= 0 ? 10 + existingRowIndex : getNextAppendRow();
 
   console.log("\n========================================");
-  console.log(`${DRY_RUN ? "[DRY-RUN] " : ""}Bundle: ${bundle.key}`);
+  console.log(`${dryRun ? "[DRY-RUN] " : ""}Bundle: ${bundle.key}`);
   console.log(`Target PDF: ${pdfFileName}`);
   console.log(
     `Page Slices: ${slicePlan
@@ -199,15 +206,15 @@ async function processBundle(params: {
     }`
   );
 
-  if (DRY_RUN) return;
+  if (dryRun) return;
 
   const prependExisting =
     existingRowIndex >= 0 &&
     existingRows[existingRowIndex][12] === "Complete" &&
     hasNewInboxSingleDoc;
-  await buildSlicedPdf(slicePlan, outputPdfPath, prependExisting);
+  await buildPdfFn(slicePlan, outputPdfPath, prependExisting);
 
-  const webViewLink = await lookupDriveLink(pdfFileName);
+  const webViewLink = await lookupDriveLinkFn(pdfFileName);
   const linkFormula = webViewLink
     ? `=HYPERLINK("${webViewLink}", "${pdfFileName}")`
     : pdfFileName;
@@ -217,7 +224,7 @@ async function processBundle(params: {
     .filter(Boolean)
     .join("; ");
 
-  await upsertExpenseRow({
+  await upsertRowFn({
     spreadsheetId,
     targetSheetRow,
     dateOfService,
@@ -239,10 +246,7 @@ async function processBundle(params: {
     bundle.matchedScheduleRow &&
     bundle.matchedScheduleRow.status !== "Paid"
   ) {
-    await markInstallmentPaid(
-      spreadsheetId,
-      bundle.matchedScheduleRow.rowIndex
-    );
+    await markPaidFn(spreadsheetId, bundle.matchedScheduleRow.rowIndex);
   }
 
   for (const item of orderedClaims) {
@@ -251,36 +255,49 @@ async function processBundle(params: {
       item.doc.docType === "TRANSACTION_CSV" ||
       Boolean(bundle.plan) ||
       !isBundleComplete
-        ? POOL_DIR
-        : ARCHIVE_DIR;
+        ? poolDir
+        : archiveDir;
     const destPath = path.join(destDir, item.doc.fileName);
     if (
       item.doc.filePath !== destPath &&
       filesToMove.get(item.doc.filePath) !==
-        path.join(POOL_DIR, item.doc.fileName)
+        path.join(poolDir, item.doc.fileName)
     ) {
       filesToMove.set(item.doc.filePath, destPath);
     }
   }
 }
 
-async function relocateProcessedFiles(
+export async function relocateProcessedFiles(
   parsedDocs: ParsedFileMetadata[],
-  filesToMove: Map<string, string>
+  filesToMove: Map<string, string>,
+  options: {
+    inboxDir?: string;
+    poolDir?: string;
+    archiveDir?: string;
+    dryRun?: boolean;
+  } = {}
 ): Promise<void> {
-  if (DRY_RUN) return;
+  const {
+    inboxDir = INBOX_DIR,
+    poolDir = POOL_DIR,
+    archiveDir = ARCHIVE_DIR,
+    dryRun = DRY_RUN,
+  } = options;
+
+  if (dryRun) return;
 
   for (const doc of parsedDocs) {
     if (
-      path.dirname(doc.filePath) === INBOX_DIR &&
+      path.dirname(doc.filePath) === inboxDir &&
       !filesToMove.has(doc.filePath)
     ) {
       const destDir =
         doc.isMultiClaimOrStatement ||
         doc.docType === "CC_STATEMENT" ||
         doc.docType === "TRANSACTION_CSV"
-          ? POOL_DIR
-          : ARCHIVE_DIR;
+          ? poolDir
+          : archiveDir;
       filesToMove.set(doc.filePath, path.join(destDir, doc.fileName));
     }
   }
@@ -290,21 +307,53 @@ async function relocateProcessedFiles(
   }
 }
 
-export async function runSync(): Promise<void> {
-  await fs.mkdir(POOL_DIR, { recursive: true });
-  await fs.mkdir(ARCHIVE_DIR, { recursive: true });
-  await fs.mkdir(RECEIPTS_ROOT_DIR, { recursive: true });
+export interface RunSyncOptions {
+  poolDir?: string;
+  archiveDir?: string;
+  receiptsRootDir?: string;
+  inboxDir?: string;
+  dryRun?: boolean;
+  resolveSpreadsheetIdFn?: () => Promise<string>;
+  fetchExpenseRowsFn?: (spreadsheetId: string) => Promise<any[][]>;
+  loadInstallmentTabFn?: typeof loadInstallmentTab;
+  loadCacheFn?: typeof loadCache;
+  scanDocumentsFn?: typeof scanDocuments;
+  processBundleFn?: typeof processBundle;
+  relocateProcessedFilesFn?: typeof relocateProcessedFiles;
+  cleanupReferencePoolFn?: typeof cleanupReferencePool;
+}
 
-  const spreadsheetId = await resolveSpreadsheetId();
+export async function runSync(options: RunSyncOptions = {}): Promise<void> {
+  const {
+    poolDir = POOL_DIR,
+    archiveDir = ARCHIVE_DIR,
+    receiptsRootDir = RECEIPTS_ROOT_DIR,
+    inboxDir = INBOX_DIR,
+    dryRun = DRY_RUN,
+    resolveSpreadsheetIdFn = resolveSpreadsheetId,
+    fetchExpenseRowsFn = fetchExpenseRows,
+    loadInstallmentTabFn = loadInstallmentTab,
+    loadCacheFn = loadCache,
+    scanDocumentsFn = scanDocuments,
+    processBundleFn = processBundle,
+    relocateProcessedFilesFn = relocateProcessedFiles,
+    cleanupReferencePoolFn = cleanupReferencePool,
+  } = options;
+
+  await fs.mkdir(poolDir, { recursive: true });
+  await fs.mkdir(archiveDir, { recursive: true });
+  await fs.mkdir(receiptsRootDir, { recursive: true });
+
+  const spreadsheetId = await resolveSpreadsheetIdFn();
   const [existingRows, installmentData, cache] = await Promise.all([
-    fetchExpenseRows(spreadsheetId),
-    loadInstallmentTab(spreadsheetId),
-    loadCache(),
+    fetchExpenseRowsFn(spreadsheetId),
+    loadInstallmentTabFn(spreadsheetId),
+    loadCacheFn(),
   ]);
   const { plans: installmentPlans, schedule: installmentSchedule } =
     installmentData;
 
-  const parsedDocs = await scanDocuments(cache, installmentPlans);
+  const parsedDocs = await scanDocumentsFn(cache, installmentPlans);
   if (parsedDocs.length === 0) {
     console.log("No documents found in Inbox.");
     return;
@@ -320,15 +369,24 @@ export async function runSync(): Promise<void> {
   const filesToMove = new Map<string, string>();
 
   for (const bundle of bundles) {
-    await processBundle({
+    await processBundleFn({
       bundle,
       spreadsheetId,
       existingRows,
       getNextAppendRow: () => 10 + nextAppendOffset++,
       filesToMove,
+      poolDir,
+      archiveDir,
+      receiptsRootDir,
+      dryRun,
     });
   }
 
-  await relocateProcessedFiles(parsedDocs, filesToMove);
-  await cleanupReferencePool(spreadsheetId, cache, installmentPlans);
+  await relocateProcessedFilesFn(parsedDocs, filesToMove, {
+    inboxDir,
+    poolDir,
+    archiveDir,
+    dryRun,
+  });
+  await cleanupReferencePoolFn(spreadsheetId, cache, installmentPlans);
 }

@@ -8,16 +8,19 @@ export async function hashFile(filePath: string): Promise<string> {
   return crypto.createHash("sha256").update(buf).digest("hex");
 }
 
-export async function loadCache(): Promise<Record<string, ParsedFileMetadata>> {
+export async function loadCache(
+  cacheFilePath: string = CACHE_FILE
+): Promise<Record<string, ParsedFileMetadata>> {
   try {
-    return JSON.parse(await fs.readFile(CACHE_FILE, "utf8"));
+    return JSON.parse(await fs.readFile(cacheFilePath, "utf8"));
   } catch {
     return {};
   }
 }
 
 export async function saveCache(
-  cache: Record<string, ParsedFileMetadata>
+  cache: Record<string, ParsedFileMetadata>,
+  cacheFilePath: string = CACHE_FILE
 ): Promise<void> {
-  await fs.writeFile(CACHE_FILE, JSON.stringify(cache, null, 2));
+  await fs.writeFile(cacheFilePath, JSON.stringify(cache, null, 2));
 }

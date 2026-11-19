@@ -18,23 +18,34 @@ import type {
 
 const SUPPORTED_DOC_REGEX = /\.(pdf|png|jpg|jpeg|csv)$/i;
 
+export interface PoolScanOptions {
+  inboxDir?: string;
+  poolDir?: string;
+  parseDoc?: typeof parseDocumentWithGemini;
+}
+
 export async function scanDocuments(
   cache: Record<string, ParsedFileMetadata>,
-  installmentPlans: InstallmentPlan[]
+  installmentPlans: InstallmentPlan[],
+  options: PoolScanOptions = {}
 ): Promise<ParsedFileMetadata[]> {
-  const entries = await fs.readdir(INBOX_DIR, { withFileTypes: true });
+  const inboxDir = options.inboxDir ?? INBOX_DIR;
+  const poolDir = options.poolDir ?? POOL_DIR;
+  const parseDoc = options.parseDoc ?? parseDocumentWithGemini;
+
+  const entries = await fs.readdir(inboxDir, { withFileTypes: true });
   const parsedDocs: ParsedFileMetadata[] = [];
 
   for (const entry of entries) {
     if (entry.name === "Reference-Pool" || entry.name.startsWith(".")) continue;
-    const fullPath = path.join(INBOX_DIR, entry.name);
+    const fullPath = path.join(inboxDir, entry.name);
 
     if (entry.isDirectory()) {
       const subFiles = await fs.readdir(fullPath);
       for (const sf of subFiles) {
         if (SUPPORTED_DOC_REGEX.test(sf)) {
           parsedDocs.push(
-            await parseDocumentWithGemini(
+            await parseDoc(
               path.join(fullPath, sf),
               entry.name,
               cache,
@@ -45,22 +56,17 @@ export async function scanDocuments(
       }
     } else if (SUPPORTED_DOC_REGEX.test(entry.name)) {
       parsedDocs.push(
-        await parseDocumentWithGemini(
-          fullPath,
-          undefined,
-          cache,
-          installmentPlans
-        )
+        await parseDoc(fullPath, undefined, cache, installmentPlans)
       );
     }
   }
 
-  const poolEntries = await fs.readdir(POOL_DIR);
+  const poolEntries = await fs.readdir(poolDir);
   for (const pe of poolEntries) {
     if (SUPPORTED_DOC_REGEX.test(pe)) {
       parsedDocs.push(
-        await parseDocumentWithGemini(
-          path.join(POOL_DIR, pe),
+        await parseDoc(
+          path.join(poolDir, pe),
           undefined,
           cache,
           installmentPlans
@@ -72,12 +78,31 @@ export async function scanDocuments(
   return parsedDocs;
 }
 
+export interface CleanupPoolOptions {
+  inboxDir?: string;
+  poolDir?: string;
+  archiveDir?: string;
+  dryRun?: boolean;
+  retentionDays?: number;
+  fetchRows?: (spreadsheetId: string) => Promise<any[][]>;
+  parseDoc?: typeof parseDocumentWithGemini;
+}
+
 export async function cleanupReferencePool(
   spreadsheetId: string,
   cache: Record<string, ParsedFileMetadata>,
-  installmentPlans: InstallmentPlan[]
+  installmentPlans: InstallmentPlan[],
+  options: CleanupPoolOptions = {}
 ): Promise<void> {
-  const latestRows = await fetchExpenseRows(spreadsheetId);
+  const inboxDir = options.inboxDir ?? INBOX_DIR;
+  const poolDir = options.poolDir ?? POOL_DIR;
+  const archiveDir = options.archiveDir ?? ARCHIVE_DIR;
+  const dryRun = options.dryRun ?? DRY_RUN;
+  const retentionDays = options.retentionDays ?? CC_POOL_RETENTION_DAYS;
+  const fetchRows = options.fetchRows ?? fetchExpenseRows;
+  const parseDoc = options.parseDoc ?? parseDocumentWithGemini;
+
+  const latestRows = await fetchRows(spreadsheetId);
 
   const isClaimCompleteInSheet = (claim: ExtractedClaim): boolean => {
     const plan = matchInstallmentPlan(claim, installmentPlans);
@@ -110,11 +135,11 @@ export async function cleanupReferencePool(
     });
   };
 
-  const poolFiles = await fs.readdir(POOL_DIR);
+  const poolFiles = await fs.readdir(poolDir);
   for (const fileName of poolFiles) {
     if (!SUPPORTED_DOC_REGEX.test(fileName)) continue;
-    const poolFilePath = path.join(POOL_DIR, fileName);
-    const meta = await parseDocumentWithGemini(
+    const poolFilePath = path.join(poolDir, fileName);
+    const meta = await parseDoc(
       poolFilePath,
       undefined,
       cache,
@@ -133,34 +158,34 @@ export async function cleanupReferencePool(
     if (meta.docType === "CC_STATEMENT") {
       const stats = await fs.stat(poolFilePath);
       const ageInDays = (Date.now() - stats.mtimeMs) / (1000 * 60 * 60 * 24);
-      retentionSatisfied = ageInDays >= CC_POOL_RETENTION_DAYS;
+      retentionSatisfied = ageInDays >= retentionDays;
     }
 
     if (allClaimsComplete && retentionSatisfied) {
-      const archiveDest = path.join(ARCHIVE_DIR, fileName);
+      const archiveDest = path.join(archiveDir, fileName);
       console.log(
         `${
-          DRY_RUN ? "[DRY-RUN] " : ""
+          dryRun ? "[DRY-RUN] " : ""
         }Retiring resolved pool document to Archive: ${fileName}`
       );
-      if (!DRY_RUN) {
+      if (!dryRun) {
         await fs.rename(poolFilePath, archiveDest);
       }
     }
   }
 
-  const inboxEntries = await fs.readdir(INBOX_DIR, { withFileTypes: true });
+  const inboxEntries = await fs.readdir(inboxDir, { withFileTypes: true });
   for (const entry of inboxEntries) {
     if (entry.isDirectory() && entry.name !== "Reference-Pool") {
-      const subDirPath = path.join(INBOX_DIR, entry.name);
+      const subDirPath = path.join(inboxDir, entry.name);
       const remaining = await fs.readdir(subDirPath);
       if (remaining.length === 0) {
         console.log(
-          `${DRY_RUN ? "[DRY-RUN] " : ""}Removing empty Inbox subfolder: ${
+          `${dryRun ? "[DRY-RUN] " : ""}Removing empty Inbox subfolder: ${
             entry.name
           }`
         );
-        if (!DRY_RUN) {
+        if (!dryRun) {
           await fs.rmdir(subDirPath);
         }
       }

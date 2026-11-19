@@ -9,7 +9,26 @@ import {
 import { hashFile, saveCache } from "./cache.js";
 import type { InstallmentPlan, ParsedFileMetadata } from "./types.js";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+export interface AiClientLike {
+  models: {
+    generateContent: (params: any) => Promise<{ text?: string }>;
+  };
+}
+
+let aiClient: AiClientLike | null = null;
+
+export function setAiClient(client: AiClientLike | null): void {
+  aiClient = client;
+}
+
+/* node:coverage disable */
+function getAiClient(): AiClientLike {
+  if (!aiClient) {
+    aiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  }
+  return aiClient;
+}
+/* node:coverage enable */
 
 export const extractionSchema: Schema = {
   type: Type.OBJECT,
@@ -112,11 +131,46 @@ export const extractionSchema: Schema = {
   required: ["docType", "isMultiClaimOrStatement", "claims"],
 };
 
+export function buildExtractionPrompt(
+  installmentPlans: InstallmentPlan[],
+  householdPromptNames: string = HOUSEHOLD_PROMPT_NAMES
+): string {
+  const planContext =
+    installmentPlans.length > 0
+      ? `\n      Active Installment Plans:\n` +
+        installmentPlans
+          .map(
+            (p) =>
+              `      - ${p.planId}: Provider="${p.provider}"${
+                p.affiliatedProviders
+                  ? ` (Affiliated EOB/Billing Providers: ${p.affiliatedProviders})`
+                  : ""
+              }, Patient="${p.patient}", TotalResponsibility=$${p.totalResponsibility}, MonthlyPayment=$${p.monthlyPayment}`
+          )
+          .join("\n") +
+        `\n      If an EOB claim or a payment transaction belongs to one of these installment plans (including any listed affiliated providers/doctors or monthly payment amounts), set 'installmentPlanId' to that Plan ID and set 'provider' to the exact Plan Provider name.`
+      : "";
+
+  return `Extract all medical claims, bills, pharmacy slips, or medical payment charges from this document for household members ${householdPromptNames}.${planContext}
+      - Subtract non-qualified items (like eyewear protection plans or warranties) from qualifiedOutOfPocketAmount.
+      - Exclude denied out-of-network claims where the plan did not cover the service due to missing preapproval/referral (e.g., reason code 707) or revised/duplicate $0.00 claims.
+      - For CSV transaction histories or Credit Card Statements, only extract bona fide medical/dental/vision/pharmacy payments or active installment plan payments (ignore payroll contributions, interest, investment transfers, and non-medical retail charges).
+      - Set provesMedicalNecessity to true if the document shows clinical service descriptions, CPT/HCPCS codes, EOB claim details, or a pharmacy Rx slip with drug/patient details.
+      - Set provesPayment to true if the document shows a payment tender, register receipt, paid-in-full balance, credit card charge, or CSV payment transaction.
+      - Always populate 'notes' with a concise audit memo (e.g., "Rx #123456 (Drug Name); Paid via Visa *1234, Auth #98765" or "Claim #2026...; Patient responsibility $150.00").`;
+}
+
+export interface GeminiParseDeps {
+  generateContent?: (params: any) => Promise<{ text?: string }>;
+  saveCacheFn?: (cache: Record<string, ParsedFileMetadata>) => Promise<void>;
+}
+
 export async function parseDocumentWithGemini(
   filePath: string,
   subfolderGroup: string | undefined,
   cache: Record<string, ParsedFileMetadata>,
-  installmentPlans: InstallmentPlan[]
+  installmentPlans: InstallmentPlan[],
+  deps: GeminiParseDeps = {}
 ): Promise<ParsedFileMetadata> {
   const hash = await hashFile(filePath);
   const planFingerprint = installmentPlans.map((p) => p.planId).join(",");
@@ -140,30 +194,7 @@ export async function parseDocumentWithGemini(
 
   const ext = path.extname(filePath).toLowerCase();
   const fileBytes = await fs.readFile(filePath);
-
-  const planContext =
-    installmentPlans.length > 0
-      ? `\n      Active Installment Plans:\n` +
-        installmentPlans
-          .map(
-            (p) =>
-              `      - ${p.planId}: Provider="${p.provider}"${
-                p.affiliatedProviders
-                  ? ` (Affiliated EOB/Billing Providers: ${p.affiliatedProviders})`
-                  : ""
-              }, Patient="${p.patient}", TotalResponsibility=$${p.totalResponsibility}, MonthlyPayment=$${p.monthlyPayment}`
-          )
-          .join("\n") +
-        `\n      If an EOB claim or a payment transaction belongs to one of these installment plans (including any listed affiliated providers/doctors or monthly payment amounts), set 'installmentPlanId' to that Plan ID and set 'provider' to the exact Plan Provider name.`
-      : "";
-
-  const promptText = `Extract all medical claims, bills, pharmacy slips, or medical payment charges from this document for household members ${HOUSEHOLD_PROMPT_NAMES}.${planContext}
-      - Subtract non-qualified items (like eyewear protection plans or warranties) from qualifiedOutOfPocketAmount.
-      - Exclude denied out-of-network claims where the plan did not cover the service due to missing preapproval/referral (e.g., reason code 707) or revised/duplicate $0.00 claims.
-      - For CSV transaction histories or Credit Card Statements, only extract bona fide medical/dental/vision/pharmacy payments or active installment plan payments (ignore payroll contributions, interest, investment transfers, and non-medical retail charges).
-      - Set provesMedicalNecessity to true if the document shows clinical service descriptions, CPT/HCPCS codes, EOB claim details, or a pharmacy Rx slip with drug/patient details.
-      - Set provesPayment to true if the document shows a payment tender, register receipt, paid-in-full balance, credit card charge, or CSV payment transaction.
-      - Always populate 'notes' with a concise audit memo (e.g., "Rx #123456 (Drug Name); Paid via Visa *1234, Auth #98765" or "Claim #2026...; Patient responsibility $150.00").`;
+  const promptText = buildExtractionPrompt(installmentPlans);
 
   const contentPart =
     ext === ".csv"
@@ -183,7 +214,10 @@ export async function parseDocumentWithGemini(
         };
 
   console.log(`Analyzing with Gemini: ${path.basename(filePath)}...`);
-  const response = await ai.models.generateContent({
+  const generateFn =
+    deps.generateContent ??
+    ((params: any) => getAiClient().models.generateContent(params));
+  const response = await generateFn({
     model: "gemini-3.8-flash",
     contents: [contentPart, promptText],
     config: {
@@ -203,6 +237,7 @@ export async function parseDocumentWithGemini(
   };
 
   cache[hash] = meta;
-  await saveCache(cache);
+  const saveFn = deps.saveCacheFn ?? saveCache;
+  await saveFn(cache);
   return meta;
 }
