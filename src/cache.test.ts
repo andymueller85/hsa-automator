@@ -49,5 +49,8 @@ describe("cache module", () => {
     await saveCache(sampleCache, cachePath);
     const loaded = await loadCache(cachePath);
     assert.deepEqual(loaded, sampleCache);
+
+    // Calling saveCache without an explicit path inside NODE_TEST_CONTEXT is a safe no-op
+    await saveCache(sampleCache);
   });
 });

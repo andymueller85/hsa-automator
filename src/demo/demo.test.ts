@@ -158,7 +158,8 @@ describe("demo module", () => {
       // 7 copied files + Reference-Pool directory
       assert.equal(inboxFiles.length, 8);
 
-      // Test non-populateInbox and failed sheet reset warning path
+      // Test non-populateInbox, clearCache: true, and failed sheet reset warning path
+      await fs.writeFile(cacheFile, "{}");
       resetCachedSpreadsheetId(null);
       const res2 = await runDemoReset({
         rootDir: tmpDir,
@@ -167,6 +168,7 @@ describe("demo module", () => {
         archiveDir,
         receiptsRootDir,
         cacheFile,
+        clearCache: true,
         populateInbox: false,
         skipSheets: false,
         driveClient: {

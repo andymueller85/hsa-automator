@@ -20,7 +20,13 @@ export async function loadCache(
 
 export async function saveCache(
   cache: Record<string, ParsedFileMetadata>,
-  cacheFilePath: string = CACHE_FILE
+  cacheFilePath?: string
 ): Promise<void> {
-  await fs.writeFile(cacheFilePath, JSON.stringify(cache, null, 2));
+  if (!cacheFilePath && process.env.NODE_TEST_CONTEXT) {
+    return;
+  }
+  await fs.writeFile(
+    cacheFilePath ?? CACHE_FILE,
+    JSON.stringify(cache, null, 2)
+  );
 }

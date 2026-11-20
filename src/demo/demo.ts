@@ -33,13 +33,15 @@ export async function createMultiPagePdf(
   filePath: string,
   pages: PageDef[]
 ): Promise<void> {
-  const pdfDoc = await PDFDocument.create();
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const doc = await PDFDocument.create();
+  doc.setCreationDate(new Date("2026-01-01T00:00:00.000Z"));
+  doc.setModificationDate(new Date("2026-01-01T00:00:00.000Z"));
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
 
   for (let i = 0; i < pages.length; i++) {
     const pDef = pages[i];
-    const page = pdfDoc.addPage([612, 792]);
+    const page = doc.addPage([612, 792]);
 
     // Header Banner
     page.drawRectangle({
@@ -91,7 +93,7 @@ export async function createMultiPagePdf(
     }
   }
 
-  const pdfBytes = await pdfDoc.save();
+  const pdfBytes = await doc.save();
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, pdfBytes);
 }
@@ -785,6 +787,7 @@ export interface RunDemoResetOptions {
   archiveDir?: string;
   receiptsRootDir?: string;
   cacheFile?: string;
+  clearCache?: boolean;
   populateInbox?: boolean;
   skipSheets?: boolean;
   driveClient?: DriveClientLike;
@@ -804,6 +807,8 @@ export async function runDemoReset(
   const archiveDir = options.archiveDir ?? ARCHIVE_DIR;
   const receiptsRootDir = options.receiptsRootDir ?? RECEIPTS_ROOT_DIR;
   const cacheFile = options.cacheFile ?? CACHE_FILE;
+  const clearCache =
+    options.clearCache ?? process.argv.includes("--clear-cache");
   const populateInbox =
     options.populateInbox ?? process.argv.includes("--populate-inbox");
   const skipSheets =
@@ -812,11 +817,13 @@ export async function runDemoReset(
   console.log(`\n=== HSA Automator: Simpsons Demo Reset ===`);
   console.log(`Demo Root Directory: ${rootDir}`);
 
-  // 1. Clean Inbox, Reference-Pool, Archive, Receipts, and Cache
+  // 1. Clean Inbox, Reference-Pool, Archive, and Receipts (preserve demo cache unless --clear-cache is passed)
   await fs.rm(inboxDir, { recursive: true, force: true });
   await fs.rm(archiveDir, { recursive: true, force: true });
   await fs.rm(receiptsRootDir, { recursive: true, force: true });
-  await fs.rm(cacheFile, { force: true });
+  if (clearCache) {
+    await fs.rm(cacheFile, { force: true });
+  }
 
   await fs.mkdir(poolDir, { recursive: true });
   await fs.mkdir(archiveDir, { recursive: true });

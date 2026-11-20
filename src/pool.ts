@@ -61,6 +61,10 @@ export async function scanDocuments(
     }
   }
 
+  if (parsedDocs.length === 0) {
+    return [];
+  }
+
   const poolEntries = await fs.readdir(poolDir);
   for (const pe of poolEntries) {
     if (SUPPORTED_DOC_REGEX.test(pe)) {

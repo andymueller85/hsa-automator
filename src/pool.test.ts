@@ -62,6 +62,28 @@ describe("pool module", () => {
         { fileName: "receipt.png", subfolderGroup: "visit-bundle" },
       ]
     );
+
+    // When Inbox has no new files, scanDocuments returns [] immediately without scanning Reference-Pool
+    await fs.unlink(path.join(inboxDir, "eob1.pdf"));
+    await fs.unlink(path.join(subDir, "receipt.png"));
+    let poolScannedWhenInboxEmpty = false;
+    const emptyInboxDocs = await scanDocuments({}, [], {
+      inboxDir,
+      poolDir,
+      parseDoc: async (filePath) => {
+        poolScannedWhenInboxEmpty = true;
+        return {
+          filePath,
+          fileName: path.basename(filePath),
+          hash: "h",
+          docType: "EOB",
+          isMultiClaimOrStatement: false,
+          claims: [],
+        };
+      },
+    });
+    assert.deepEqual(emptyInboxDocs, []);
+    assert.equal(poolScannedWhenInboxEmpty, false);
   });
 
   test("retires resolved pool documents to Archive and removes empty Inbox subfolders", async () => {
